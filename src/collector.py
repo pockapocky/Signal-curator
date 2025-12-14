@@ -434,3 +434,5 @@ if __name__ == "__main__":
         print("FATAL ERROR:", repr(e))
         traceback.print_exc()
         raise
+        
+out/daily_2025-12-14.md
