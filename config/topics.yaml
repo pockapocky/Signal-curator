@@ -2,10 +2,103 @@ time_zone: Europe/Amsterdam
 lookback_days: 1
 
 topics:
-  - name: Artificial Intelligence
+  - name: Artificial Intelligence (AI)
+    queries:
+      - artificial intelligence
+      - generative AI
+      - LLM
+      - OpenAI
+      - Anthropic
+      - Google DeepMind
+      - AI regulation
+      - AI safety
     sources:
       - google_news
       - reddit:r/artificial
       - reddit:r/agi
-      - arxiv
+      - hackernews
+
+  - name: Logistics & Supply Chain
+    queries:
+      - logistics
+      - supply chain
+      - air freight
+      - ocean freight
+      - container shipping
+      - warehouse automation
+      - last mile delivery
+      - customs clearance
+      - geopolitics supply chain
+    sources:
+      - google_news
+      - reddit:r/logistics
+      - hackernews
+
+  - name: Japan (politics, economy, culture, tech)
+    queries:
+      - Japan politics
+      - Japan economy
+      - Japan technology
+      - 自民党
+      - 日本 経済
+      - 日米同盟
+      - 中国 日本 関係
+      - 半導体 日本
+      - 円 安
+    sources:
+      - google_news
+      - reddit:r/japan
+      - hackernews
+
+  - name: United States (Top News)
+    queries:
+      - United States politics
+      - US economy
+      - Supreme Court
+      - Congress
+      - inflation
+      - election
+      - national security
+    sources:
+      - google_news
+
+  - name: FedEx / Global Carriers
+    queries:
+      - FedEx
+      - FedEx Express
+      - UPS
+      - DHL
+      - air cargo
+      - parcel shipping
+      - integrator logistics
+    sources:
+      - google_news
+      - hackernews
+
+  - name: Creative Inspiration (art, design, innovation)
+    queries:
+      - design innovation
+      - generative art
+      - architecture
+      - industrial design
+      - creative tools
+      - typography
+      - exhibition
+    sources:
+      - google_news
+      - hackernews
+
+  - name: Lithuanian Culture & Baltic Region
+    queries:
+      - Lithuania
+      - Vilnius culture
+      - Lithuania politics
+      - Baltics
+      - Lietuva
+      - Vilnius
+      - Baltijos šalys
+      - Lietuvos kultūra
+    sources:
+      - google_news
+      - reddit:r/lithuania
       - hackernews
