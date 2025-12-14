@@ -371,34 +371,51 @@ def collect_for_topic(topic_cfg: Dict, cutoff: datetime, tz) -> List[Item]:
     return dedupe(out)
 
 
+import os
+from io import StringIO
+
 def print_digest(selected: Dict[str, List[Item]], tz):
     now = datetime.now(tz)
     date_str = now.strftime("%Y-%m-%d")
 
-    print(f"**{date_str} – Headlines for Today**")
-    print(f"*(Europe/Amsterdam time — generated {now.strftime('%Y-%m-%d %H:%M')} {tz.zone})*")
-    print()
+    buf = StringIO()
+
+    def w(line: str = ""):
+        print(line)
+        buf.write(line + "\n")
+
+    w(f"**{date_str} – Headlines for Today**")
+    w(f"*(Europe/Amsterdam time — generated {now.strftime('%Y-%m-%d %H:%M')} {tz.zone})*")
+    w()
 
     for topic, items in selected.items():
-        print(f"#### {topic}")
+        w(f"#### {topic}")
         if not items:
-            print("• (No items found in lookback window)")
-            print()
+            w("• (No items found in lookback window)")
+            w()
             continue
 
         for it in items:
             lang = it.language or "UNK"
             tone = it.tone if it.tone in {"+", "–", "0"} else "0"
             pub = it.published_raw or ""
-            # Keep it clean, readable, and link-forward
             if it.link:
-                print(f"• {it.title} (tone: {tone}) — {it.source} {it.link} [{lang}] [{pub}]")
+                w(f"• {it.title} (tone: {tone}) — {it.source} {it.link} [{lang}] [{pub}]")
             else:
-                print(f"• {it.title} (tone: {tone}) — {it.source} [{lang}]")
-        print()
+                w(f"• {it.title} (tone: {tone}) — {it.source} [{lang}]")
+        w()
 
-    print("---")
-    print(f"**End of {date_str} Update**")
+    w("---")
+    w(f"**End of {date_str} Update**")
+
+    # Write to file
+    os.makedirs("out", exist_ok=True)
+    out_path = f"out/daily_{date_str}.md"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(buf.getvalue())
+
+    # Helpful log line for Actions
+    print(f"\nWROTE_FILE: {out_path}\n")
 
 
 def main():
@@ -434,5 +451,3 @@ if __name__ == "__main__":
         print("FATAL ERROR:", repr(e))
         traceback.print_exc()
         raise
-        
-out/daily_2025-12-14.md
