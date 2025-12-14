@@ -1,6 +1,28 @@
+"""
+SignalCurator — collector.py
+
+Purpose:
+- Read config/topics.yaml
+- Pull items from the last N days (Europe/Amsterdam clock for display)
+- Sources supported:
+  - google_news (Google News RSS search)
+  - reddit:r/<sub> (Reddit RSS)
+  - hackernews (HN Algolia search API)
+  - arxiv:<category> (arXiv RSS by category, e.g., arxiv:cs.AI)
+- De-duplicate and cap output (10–15 total) while keeping broad coverage
+- Print a daily digest with:
+  **YYYY-MM-DD – Headlines for Today**
+  ...
+  **End of YYYY-MM-DD Update**
+"""
+
+from __future__ import annotations
+
 import hashlib
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus
 
 import feedparser
@@ -10,144 +32,208 @@ import yaml
 from dateutil import parser as dtparser
 
 
-def load_config(path="config/topics.yaml"):
+CONFIG_PATH = "config/topics.yaml"
+
+
+# ----------------------------
+# Models
+# ----------------------------
+
+@dataclass
+class Item:
+    title: str
+    link: str
+    source: str
+    published_raw: str = ""
+    published_dt: Optional[datetime] = None
+    language: str = "EN"   # EN/JA/LT/UNK (simple heuristic)
+    tone: str = "0"        # + / – / 0  (light heuristic)
+    topic: str = ""        # filled later
+
+
+# ----------------------------
+# Utilities
+# ----------------------------
+
+def load_config(path: str = CONFIG_PATH) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def normalize_text(s: str) -> str:
+def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def item_id(title: str, link: str) -> str:
-    key = f"{normalize_text(title).lower()}|{normalize_text(link)}"
+def stable_id(title: str, link: str) -> str:
+    key = f"{norm(title).lower()}|{norm(link)}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
-def within_lookback(published_dt, cutoff_dt):
-    if not published_dt:
-        return True  # if no date, keep it (we’ll improve later)
-    return published_dt >= cutoff_dt
+def parse_dt(s: str) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return dtparser.parse(s)
+    except Exception:
+        return None
 
 
-def parse_published(entry):
-    # RSS feeds vary a lot. Try common fields.
-    for field in ("published", "updated", "created"):
-        if field in entry and entry[field]:
-            try:
-                return dtparser.parse(entry[field])
-            except Exception:
-                pass
-    return None
+def detect_language(text: str) -> str:
+    # Heuristic: Japanese kana/kanji => JA
+    if re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", text):
+        return "JA"
+    # Lithuanian-specific letters => LT (very rough)
+    if re.search(r"[ąčęėįšųūžĄČĘĖĮŠŲŪŽ]", text):
+        return "LT"
+    # Default to EN
+    return "EN"
 
 
-def fetch_google_news(query, max_items=10):
-    # Google News RSS search endpoint
+def tone_heuristic(text: str) -> str:
+    t = text.lower()
+    negative = ["cuts", "layoff", "down", "crisis", "war", "lawsuit", "decline", "ban", "fraud", "hack", "breach"]
+    positive = ["record", "surge", "growth", "breakthrough", "wins", "launch", "upgrade", "improves", "expands"]
+    if any(w in t for w in negative):
+        return "–"
+    if any(w in t for w in positive):
+        return "+"
+    return "0"
+
+
+def fetch_feed(url: str, timeout: int = 25) -> feedparser.FeedParserDict:
+    # Reddit (and sometimes Google News) behaves better with a real User-Agent
+    headers = {
+        "User-Agent": "signal-curator/1.0 (+https://github.com/; contact: replace-me@example.com)"
+    }
+    r = requests.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    return feedparser.parse(r.content)
+
+
+def within_lookback(dt_obj: Optional[datetime], cutoff: datetime) -> bool:
+    # If no date available, keep it (but it may be filtered later by caps)
+    if dt_obj is None:
+        return True
+    return dt_obj >= cutoff
+
+
+def to_local(dt_obj: Optional[datetime], tz) -> Optional[datetime]:
+    if dt_obj is None:
+        return None
+    if dt_obj.tzinfo is None:
+        dt_obj = pytz.UTC.localize(dt_obj)
+    return dt_obj.astimezone(tz)
+
+
+# ----------------------------
+# Source collectors
+# ----------------------------
+
+def collect_google_news(query: str, per_query: int) -> List[Item]:
     url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en&gl=US&ceid=US:en"
-    feed = feedparser.parse(url)
-    items = []
-    for e in feed.entries[:max_items]:
+    feed = fetch_feed(url)
+    items: List[Item] = []
+    for e in feed.entries[:per_query]:
+        title = norm(e.get("title", ""))
+        link = e.get("link", "")
+        published = e.get("published", "") or e.get("updated", "")
+        dt_obj = parse_dt(published)
         items.append(
-            {
-                "title": normalize_text(e.get("title")),
-                "link": e.get("link"),
-                "source": "Google News",
-                "published": e.get("published", "") or e.get("updated", ""),
-            }
+            Item(
+                title=title,
+                link=link,
+                source="Google News",
+                published_raw=published,
+                published_dt=dt_obj,
+                language=detect_language(title),
+                tone=tone_heuristic(title),
+            )
         )
     return items
 
 
-def fetch_reddit_rss(subreddit, max_items=10):
+def collect_reddit(subreddit: str, per_sub: int) -> List[Item]:
     url = f"https://www.reddit.com/r/{subreddit}/.rss"
-    feed = feedparser.parse(url)
-    items = []
-    for e in feed.entries[:max_items]:
+    feed = fetch_feed(url)
+    items: List[Item] = []
+    for e in feed.entries[:per_sub]:
+        title = norm(e.get("title", ""))
+        link = e.get("link", "")
+        published = e.get("published", "") or e.get("updated", "")
+        dt_obj = parse_dt(published)
         items.append(
-            {
-                "title": normalize_text(e.get("title")),
-                "link": e.get("link"),
-                "source": f"Reddit r/{subreddit}",
-                "published": e.get("published", "") or e.get("updated", ""),
-            }
+            Item(
+                title=title,
+                link=link,
+                source=f"Reddit r/{subreddit}",
+                published_raw=published,
+                published_dt=dt_obj,
+                language=detect_language(title),
+                tone=tone_heuristic(title),
+            )
         )
     return items
 
 
-def fetch_arxiv(query, max_items=10):
-    # arXiv RSS supports search query
-    url = f"https://export.arxiv.org/rss/{quote_plus(query)}"
-    feed = feedparser.parse(url)
-    items = []
-    for e in feed.entries[:max_items]:
-        items.append(
-            {
-                "title": normalize_text(e.get("title")),
-                "link": e.get("link"),
-                "source": "arXiv",
-                "published": e.get("published", "") or e.get("updated", ""),
-            }
-        )
-    return items
-
-
-def fetch_hn(query, max_items=10):
-    # Hacker News via Algolia search API (public)
+def collect_hackernews(query: str, per_query: int) -> List[Item]:
     url = f"https://hn.algolia.com/api/v1/search?query={quote_plus(query)}&tags=story"
-    r = requests.get(url, timeout=20)
+    r = requests.get(url, timeout=25)
     r.raise_for_status()
     data = r.json()
-    items = []
-    for hit in data.get("hits", [])[:max_items]:
-        title = normalize_text(hit.get("title"))
+
+    items: List[Item] = []
+    for hit in data.get("hits", [])[:per_query]:
+        title = norm(hit.get("title") or "")
         link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
-        created_at = hit.get("created_at", "")
+        published = hit.get("created_at", "")
+        dt_obj = parse_dt(published)
         items.append(
-            {
-                "title": title,
-                "link": link,
-                "source": "Hacker News",
-                "published": created_at,
-            }
+            Item(
+                title=title,
+                link=link,
+                source="Hacker News",
+                published_raw=published,
+                published_dt=dt_obj,
+                language=detect_language(title),
+                tone=tone_heuristic(title),
+            )
         )
     return items
 
 
-def collect_for_topic(query, sources, per_source=8):
-    collected = []
-
-    # Use topic name as the base query unless you later add explicit query strings.
-    base_query = query
-
-    for src in sources:
-        if src == "google_news":
-            collected += fetch_google_news(base_query, max_items=per_source)
-
-        elif src.startswith("reddit:r/"):
-            subreddit = src.split("reddit:r/")[1]
-            collected += fetch_reddit_rss(subreddit, max_items=per_source)
-
-        elif src == "arxiv":
-            collected += fetch_arxiv(base_query, max_items=per_source)
-
-        elif src == "hackernews":
-            collected += fetch_hn(base_query, max_items=per_source)
-
-        # placeholders for later:
-        # elif src == "trade_rss": ...
-        # elif src == "nikkei": ...
-        # elif src == "nhk": ...
-        # elif src == "reuters": ...
-        # elif src == "sec_filings": ...
-
-    return collected
+def collect_arxiv(category: str, per_cat: int) -> List[Item]:
+    # arXiv RSS is best by category (e.g. cs.AI, cs.LG, cs.CL)
+    url = f"https://export.arxiv.org/rss/{category}"
+    feed = fetch_feed(url)
+    items: List[Item] = []
+    for e in feed.entries[:per_cat]:
+        title = norm(e.get("title", ""))
+        link = e.get("link", "")
+        published = e.get("published", "") or e.get("updated", "")
+        dt_obj = parse_dt(published)
+        items.append(
+            Item(
+                title=title,
+                link=link,
+                source=f"arXiv {category}",
+                published_raw=published,
+                published_dt=dt_obj,
+                language="EN",
+                tone="0",
+            )
+        )
+    return items
 
 
-def dedupe(items):
+# ----------------------------
+# Planning / ranking
+# ----------------------------
+
+def dedupe(items: List[Item]) -> List[Item]:
     seen = set()
-    out = []
+    out: List[Item] = []
     for it in items:
-        key = item_id(it.get("title", ""), it.get("link", ""))
+        key = stable_id(it.title, it.link)
         if key in seen:
             continue
         seen.add(key)
@@ -155,62 +241,196 @@ def dedupe(items):
     return out
 
 
-def main():
-    cfg = load_config()
-    tz = pytz.timezone(cfg.get("time_zone", "Europe/Amsterdam"))
-    lookback_days = int(cfg.get("lookback_days", 1))
+def sort_newest(items: List[Item], tz) -> List[Item]:
+    def key(it: Item):
+        dt_local = to_local(it.published_dt, tz)
+        # None dates go last
+        return dt_local or datetime(1970, 1, 1, tzinfo=tz)
 
+    return sorted(items, key=key, reverse=True)
+
+
+def cap_broad_coverage(
+    by_topic: Dict[str, List[Item]],
+    tz,
+    total_min: int = 10,
+    total_max: int = 15,
+    per_topic_cap: int = 3,
+) -> Dict[str, List[Item]]:
+    """
+    Keep coverage broad:
+    - take up to per_topic_cap per topic first
+    - then fill remaining slots with newest across topics
+    """
+    selected: Dict[str, List[Item]] = {k: [] for k in by_topic.keys()}
+
+    # First pass: up to per_topic_cap per topic
+    pool: List[Tuple[str, Item]] = []
+    for topic, items in by_topic.items():
+        items_sorted = sort_newest(items, tz)
+        take = items_sorted[:per_topic_cap]
+        selected[topic] = take
+        # leftovers go to pool
+        for it in items_sorted[per_topic_cap:]:
+            pool.append((topic, it))
+
+    # Count
+    count = sum(len(v) for v in selected.values())
+
+    # If we’re under minimum, fill from pool (newest first) up to total_max
+    pool_sorted = sorted(pool, key=lambda x: (to_local(x[1].published_dt, tz) or datetime(1970, 1, 1, tzinfo=tz)), reverse=True)
+    target = max(total_min, min(total_max, total_max))  # keep sane
+    while count < target and pool_sorted:
+        topic, it = pool_sorted.pop(0)
+        selected[topic].append(it)
+        count += 1
+        if count >= total_max:
+            break
+
+    # Trim if over max (rare): trim oldest extras
+    if count > total_max:
+        # flatten and keep newest total_max, then re-group
+        flat: List[Tuple[str, Item]] = []
+        for topic, items in selected.items():
+            for it in items:
+                flat.append((topic, it))
+        flat = sorted(flat, key=lambda x: (to_local(x[1].published_dt, tz) or datetime(1970, 1, 1, tzinfo=tz)), reverse=True)[:total_max]
+        selected = {k: [] for k in by_topic.keys()}
+        for topic, it in flat:
+            selected[topic].append(it)
+
+    # Final sort within each topic
+    for topic in selected.keys():
+        selected[topic] = sort_newest(selected[topic], tz)
+
+    return selected
+
+
+# ----------------------------
+# Main runner
+# ----------------------------
+
+def collect_for_topic(topic_cfg: Dict, cutoff: datetime, tz) -> List[Item]:
+    name = topic_cfg.get("name", "Untitled Topic")
+    queries = topic_cfg.get("queries") or [name]
+    sources = topic_cfg.get("sources") or []
+
+    # per-source tuning (keeps it broad but not spammy)
+    per_query_google = 4
+    per_query_hn = 4
+    per_sub_reddit = 6
+    per_cat_arxiv = 6
+
+    items: List[Item] = []
+
+    for src in sources:
+        try:
+            if src == "google_news":
+                for q in queries:
+                    items += collect_google_news(q, per_query_google)
+
+            elif src.startswith("reddit:r/"):
+                sub = src.split("reddit:r/")[1]
+                items += collect_reddit(sub, per_sub_reddit)
+
+            elif src == "hackernews":
+                for q in queries:
+                    items += collect_hackernews(q, per_query_hn)
+
+            elif src.startswith("arxiv:"):
+                cat = src.split("arxiv:")[1]
+                items += collect_arxiv(cat, per_cat_arxiv)
+
+            else:
+                # Unknown source token; ignore (don’t crash)
+                pass
+
+        except Exception as e:
+            # Don’t let one source kill the whole run
+            items.append(
+                Item(
+                    title=f"[Source error] {src}: {type(e).__name__}",
+                    link="",
+                    source="SignalCurator",
+                    published_raw="",
+                    published_dt=None,
+                    language="UNK",
+                    tone="–",
+                    topic=name,
+                )
+            )
+
+    # Apply topic + lookback filter
+    out: List[Item] = []
+    for it in items:
+        it.topic = name
+        dt_local = to_local(it.published_dt, tz)
+        if within_lookback(dt_local, cutoff):
+            out.append(it)
+
+    return dedupe(out)
+
+
+def print_digest(selected: Dict[str, List[Item]], tz):
     now = datetime.now(tz)
-    cutoff = now - timedelta(days=lookback_days)
-
     date_str = now.strftime("%Y-%m-%d")
+
     print(f"**{date_str} – Headlines for Today**")
-    print(f"*(Europe/Amsterdam time — lookback: last {lookback_days} day(s))*")
+    print(f"*(Europe/Amsterdam time — generated {now.strftime('%Y-%m-%d %H:%M')} {tz.zone})*")
     print()
 
-    for t in cfg.get("topics", []):
-        topic_name = t["name"]
-        sources = t.get("sources", [])
-
-        queries = t.get("queries", [topic_name])
-items = []
-for q in queries:
-    items += collect_for_topic(q, sources, per_source=4)
-
-        # Filter by time window where possible
-        filtered = []
-        for it in items:
-            pub_dt = parse_published(it)
-            if pub_dt and pub_dt.tzinfo is None:
-                # Assume UTC if missing tz (common in APIs)
-                pub_dt = pytz.UTC.localize(pub_dt)
-            if pub_dt:
-                pub_dt_local = pub_dt.astimezone(tz)
-            else:
-                pub_dt_local = None
-
-            if within_lookback(pub_dt_local, cutoff):
-                filtered.append(it)
-
-        filtered = dedupe(filtered)[:10]
-
-        print(f"#### {topic_name}")
-        if not filtered:
-            print("- (No items found in lookback window)")
+    for topic, items in selected.items():
+        print(f"#### {topic}")
+        if not items:
+            print("• (No items found in lookback window)")
             print()
             continue
 
-        for it in filtered:
-            title = it["title"]
-            link = it["link"]
-            source = it["source"]
-            published = it.get("published", "")
-            print(f"• {title} — ({source}) {link} [{published}]")
+        for it in items:
+            lang = it.language or "UNK"
+            tone = it.tone if it.tone in {"+", "–", "0"} else "0"
+            pub = it.published_raw or ""
+            # Keep it clean, readable, and link-forward
+            if it.link:
+                print(f"• {it.title} (tone: {tone}) — {it.source} {it.link} [{lang}] [{pub}]")
+            else:
+                print(f"• {it.title} (tone: {tone}) — {it.source} [{lang}]")
         print()
 
     print("---")
     print(f"**End of {date_str} Update**")
 
 
+def main():
+    cfg = load_config()
+    tz = pytz.timezone(cfg.get("time_zone", "Europe/Amsterdam"))
+    lookback_days = int(cfg.get("lookback_days", 1))
+    cutoff = datetime.now(tz) - timedelta(days=lookback_days)
+
+    topics = cfg.get("topics", [])
+    by_topic: Dict[str, List[Item]] = {}
+
+    for t in topics:
+        name = t.get("name", "Untitled Topic")
+        by_topic[name] = collect_for_topic(t, cutoff, tz)
+
+    # Enforce “10–15 total, broad coverage”
+    selected = cap_broad_coverage(
+        by_topic=by_topic,
+        tz=tz,
+        total_min=10,
+        total_max=15,
+        per_topic_cap=3,
+    )
+
+    print_digest(selected, tz)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print("FATAL ERROR:", repr(e))
+        traceback.print_exc()
+        raise
