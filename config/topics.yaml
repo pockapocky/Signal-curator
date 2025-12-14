@@ -1,0 +1,11 @@
+time_zone: Europe/Amsterdam
+lookback_days: 1
+
+topics:
+  - name: Artificial Intelligence
+    sources:
+      - google_news
+      - reddit:r/artificial
+      - reddit:r/agi
+      - arxiv
+      - hackernews
