@@ -113,11 +113,11 @@ def fetch_hn(query, max_items=10):
     return items
 
 
-def collect_for_topic(topic_name, sources, per_source=8):
+def collect_for_topic(query, sources, per_source=8):
     collected = []
 
     # Use topic name as the base query unless you later add explicit query strings.
-    base_query = topic_name
+    base_query = query
 
     for src in sources:
         if src == "google_news":
@@ -172,7 +172,10 @@ def main():
         topic_name = t["name"]
         sources = t.get("sources", [])
 
-        items = collect_for_topic(topic_name, sources, per_source=6)
+        queries = t.get("queries", [topic_name])
+items = []
+for q in queries:
+    items += collect_for_topic(q, sources, per_source=4)
 
         # Filter by time window where possible
         filtered = []
